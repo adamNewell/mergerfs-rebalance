@@ -294,7 +294,8 @@ class BalanceCoordinator:
 
     def _find_file_to_transfer(self, source_drive: Drive) -> Optional[tuple[str, int]]:
         """Find the first file on source drive that can be transferred."""
-        for file_path, file_size in self.file_selector.walk_drive(source_drive.path):
+        walk_path = self.drive_manager.get_walk_path(source_drive)
+        for file_path, file_size in self.file_selector.walk_drive(walk_path):
             # Check if destination has enough space
             dest = self.drive_manager.get_best_destination(exclude_busy=True)
             if dest and dest.stats.free_bytes > file_size:

@@ -112,11 +112,15 @@ def get_drive_stats(path: str) -> DriveStats:
     )
 
 
-def discover_mergerfs_drives(mount_point: str) -> list[str]:
+def discover_mergerfs_drives(mount_point: str) -> tuple[list[str], str]:
     """Discover underlying drives from a mergerfs mount point.
 
     Uses the same method as mergerfs.balance: reads user.mergerfs.srcmounts
     xattr from the .mergerfs control file.
+
+    Returns:
+        Tuple of (srcmounts list, subpath relative to mergerfs root)
+        The subpath is used to walk only the relevant subdirectory on each drive.
     """
     mount_point = os.path.realpath(mount_point)
 
@@ -134,7 +138,17 @@ def discover_mergerfs_drives(mount_point: str) -> list[str]:
     if not srcmounts:
         raise ValueError(f"Could not read srcmounts from: {ctrlfile}")
 
-    return srcmounts
+    # Calculate subpath: relative path from mergerfs root to user-specified path
+    # Control file is at <mergerfs_root>/.mergerfs, so root is its parent
+    mergerfs_root = os.path.dirname(ctrlfile)
+    if mount_point.startswith(mergerfs_root):
+        subpath = os.path.relpath(mount_point, mergerfs_root)
+        if subpath == '.':
+            subpath = ''
+    else:
+        subpath = ''
+
+    return srcmounts, subpath
 
 
 def expand_glob_paths(paths: list[str]) -> list[str]:
@@ -165,8 +179,8 @@ class DriveManager:
         self.mount_point = mount_point
         self._lock = threading.Lock()
 
-        # Discover all drives
-        discovered = discover_mergerfs_drives(mount_point)
+        # Discover all drives and the subpath to walk
+        discovered, self.subpath = discover_mergerfs_drives(mount_point)
         discovered = expand_glob_paths(discovered)
 
         if not discovered:
@@ -196,6 +210,12 @@ class DriveManager:
     def all_drives(self) -> list[Drive]:
         """Return all drives."""
         return list(self._drives.values())
+
+    def get_walk_path(self, drive: Drive) -> str:
+        """Get the path to walk for a drive, including subpath if specified."""
+        if self.subpath:
+            return os.path.join(drive.path, self.subpath)
+        return drive.path
 
     @property
     def source_drives(self) -> list[Drive]:
