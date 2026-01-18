@@ -52,13 +52,16 @@ class BalanceConfig:
     max_size: Optional[int] = None
 
     # New enhancement options
-    parallel: int = 1
+    parallel: int = 0  # 0 = auto (min of source/dest drives needing balance)
     source_drives: list[str] = field(default_factory=list)
     dest_drives: list[str] = field(default_factory=list)
     dry_run: bool = False
     verbose: int = 0  # 0=normal, 1=verbose, 2=very verbose (rich)
     quiet: bool = False
     config_file: Optional[str] = None
+    abort_on_error: bool = False  # Abort immediately after error_threshold consecutive errors
+    error_threshold: int = 5  # Consecutive errors before pausing/aborting
+    error_log: Optional[str] = None  # File to log errors to
 
     def validate(self) -> list[str]:
         """Validate configuration, return list of errors."""
@@ -70,8 +73,8 @@ class BalanceConfig:
         if self.percentage <= 0:
             errors.append(f"Percentage must be positive: {self.percentage}")
 
-        if self.parallel < 1:
-            errors.append(f"Parallel must be at least 1: {self.parallel}")
+        if self.parallel < 0:
+            errors.append(f"Parallel must be 0 (auto) or positive: {self.parallel}")
 
         if self.min_size is not None and self.max_size is not None:
             if self.min_size > self.max_size:
@@ -159,9 +162,9 @@ Examples:
     parser.add_argument(
         '--parallel',
         type=int,
-        default=1,
+        default=0,
         metavar='N',
-        help='maximum concurrent transfers (default: 1)'
+        help='concurrent transfers; 0=auto based on drives needing balance (default: 0)'
     )
 
     parser.add_argument(
@@ -210,6 +213,26 @@ Examples:
     )
 
     parser.add_argument(
+        '--abort-on-error',
+        action='store_true',
+        help='abort after consecutive errors (default: pause and prompt)'
+    )
+
+    parser.add_argument(
+        '--error-threshold',
+        type=int,
+        default=5,
+        metavar='N',
+        help='consecutive errors before pausing/aborting (default: 5)'
+    )
+
+    parser.add_argument(
+        '--error-log',
+        metavar='FILE',
+        help='file to log errors to'
+    )
+
+    parser.add_argument(
         '--version',
         action='version',
         version='%(prog)s 0.1.0'
@@ -237,6 +260,9 @@ def parse_args(args: Optional[list[str]] = None) -> BalanceConfig:
         verbose=parsed.verbose,
         quiet=parsed.quiet,
         config_file=parsed.config_file,
+        abort_on_error=parsed.abort_on_error,
+        error_threshold=parsed.error_threshold,
+        error_log=parsed.error_log,
     )
 
     return config

@@ -83,6 +83,15 @@ def _parse_config_dict(data: dict[str, Any], config_path: str) -> BalanceConfig:
     if 'quiet' in data:
         config.quiet = bool(data['quiet'])
 
+    if 'abort_on_error' in data:
+        config.abort_on_error = bool(data['abort_on_error'])
+
+    if 'error_threshold' in data:
+        config.error_threshold = int(data['error_threshold'])
+
+    if 'error_log' in data:
+        config.error_log = str(data['error_log'])
+
     return config
 
 
@@ -106,6 +115,9 @@ def merge_configs(file_config: BalanceConfig, cli_config: BalanceConfig) -> Bala
         verbose=file_config.verbose,
         quiet=file_config.quiet,
         config_file=cli_config.config_file,
+        abort_on_error=file_config.abort_on_error,
+        error_threshold=file_config.error_threshold,
+        error_log=file_config.error_log,
     )
 
     # Override with CLI values if they differ from defaults
@@ -125,8 +137,8 @@ def merge_configs(file_config: BalanceConfig, cli_config: BalanceConfig) -> Bala
     if cli_config.max_size is not None:
         merged.max_size = cli_config.max_size
 
-    # Parallel: CLI overrides if not default (1)
-    if cli_config.parallel != 1:
+    # Parallel: CLI overrides if not default (0 = auto)
+    if cli_config.parallel != 0:
         merged.parallel = cli_config.parallel
 
     # Drives: CLI overrides if set
@@ -142,6 +154,14 @@ def merge_configs(file_config: BalanceConfig, cli_config: BalanceConfig) -> Bala
         merged.verbose = cli_config.verbose
     if cli_config.quiet:
         merged.quiet = True
+
+    # Error handling: CLI overrides
+    if cli_config.abort_on_error:
+        merged.abort_on_error = True
+    if cli_config.error_threshold != 5:
+        merged.error_threshold = cli_config.error_threshold
+    if cli_config.error_log:
+        merged.error_log = cli_config.error_log
 
     return merged
 
@@ -200,8 +220,8 @@ exclude:
 min_size: 100M
 max_size: 50G
 
-# Parallel transfers (default: 1)
-parallel: 4
+# Parallel transfers (0=auto based on drives needing balance, default: 0)
+parallel: 0
 
 # Limit to specific drives
 source_drives:

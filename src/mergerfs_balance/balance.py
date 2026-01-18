@@ -116,6 +116,13 @@ class BalanceCoordinator:
         self.stats = BalanceStats()
         self._shutdown = threading.Event()
         self._display = None
+        self._consecutive_errors = 0
+        self._error_paused = False
+
+        # Open error log file if specified
+        self._error_log_file = None
+        if config.error_log:
+            self._error_log_file = open(config.error_log, 'a')
 
         # Initialize drive manager
         self.drive_manager = DriveManager(
@@ -132,8 +139,16 @@ class BalanceCoordinator:
             max_size=config.max_size,
         )
 
+        # Calculate worker count: auto (0) means min(overfull, underfull) drives
+        if config.parallel == 0:
+            overfull = self.drive_manager.get_overfull_drives(config.percentage)
+            underfull = self.drive_manager.get_underfull_drives(config.percentage)
+            max_workers = max(1, min(len(overfull), len(underfull)))
+        else:
+            max_workers = config.parallel
+
         # Initialize transfer pool
-        self.transfer_pool = TransferPool(max_workers=config.parallel)
+        self.transfer_pool = TransferPool(max_workers=max_workers)
 
         # Setup signal handlers
         signal.signal(signal.SIGINT, self._signal_handler)
@@ -158,6 +173,8 @@ class BalanceCoordinator:
         finally:
             if self._display:
                 self._display.stop()
+            if self._error_log_file:
+                self._error_log_file.close()
 
     def _balance_loop(self) -> int:
         """Main balance loop."""
@@ -226,10 +243,7 @@ class BalanceCoordinator:
                     def on_complete(result: TransferResult, dest_path: str = dest_drive.path):
                         self.drive_manager.release_write_lock(dest_path)
                         self.stats.add_result(result)
-                        if result.status == TransferStatus.COMPLETED:
-                            self._log_verbose(f"Completed: {result.source_path}")
-                        elif result.status == TransferStatus.FAILED:
-                            self._log_error(f"Failed: {result.source_path} - {result.error_message}")
+                        self._handle_transfer_result(result)
 
                     # Create and submit transfer with completion callback
                     worker = TransferWorker(
@@ -298,9 +312,73 @@ class BalanceCoordinator:
             print(message)
 
     def _log_error(self, message: str) -> None:
-        """Log an error message."""
-        if not self._display:
-            print(f"ERROR: {message}", file=sys.stderr)
+        """Log an error message to stderr and optionally to file."""
+        from datetime import datetime
+        timestamp = datetime.now().isoformat()
+        formatted = f"ERROR: {message}"
+
+        # Always log to stderr (even with rich display)
+        print(formatted, file=sys.stderr)
+
+        # Log to file if specified
+        if self._error_log_file:
+            self._error_log_file.write(f"[{timestamp}] {formatted}\n")
+            self._error_log_file.flush()
+
+    def _handle_transfer_result(self, result: TransferResult) -> None:
+        """Handle a transfer result, tracking consecutive errors."""
+        if result.status == TransferStatus.COMPLETED:
+            self._consecutive_errors = 0  # Reset on success
+            self._log_verbose(f"Completed: {result.source_path}")
+        elif result.status == TransferStatus.FAILED:
+            self._consecutive_errors += 1
+            self._log_error(f"Failed: {result.source_path} - {result.error_message}")
+            self._check_error_threshold()
+
+    def _check_error_threshold(self) -> None:
+        """Check if consecutive errors have reached threshold."""
+        if self._consecutive_errors < self.config.error_threshold:
+            return
+
+        if self.config.abort_on_error:
+            print(f"\nAborting: {self._consecutive_errors} consecutive errors", file=sys.stderr)
+            self._shutdown.set()
+            self.transfer_pool.cancel_all()
+        else:
+            self._prompt_continue()
+
+    def _prompt_continue(self) -> None:
+        """Prompt user to continue after consecutive errors."""
+        if self._error_paused:
+            return  # Already paused, waiting for input
+
+        self._error_paused = True
+
+        # Stop rich display temporarily if active
+        if self._display:
+            self._display.stop()
+
+        print(f"\n{'='*50}", file=sys.stderr)
+        print(f"WARNING: {self._consecutive_errors} consecutive errors", file=sys.stderr)
+        print(f"{'='*50}", file=sys.stderr)
+
+        try:
+            response = input("Continue? [y/N]: ").strip().lower()
+            if response != 'y':
+                print("Aborting by user request.", file=sys.stderr)
+                self._shutdown.set()
+                self.transfer_pool.cancel_all()
+            else:
+                self._consecutive_errors = 0  # Reset counter
+                if self._display:
+                    self._display.start()
+        except EOFError:
+            # Non-interactive, abort
+            print("\nNon-interactive mode, aborting.", file=sys.stderr)
+            self._shutdown.set()
+            self.transfer_pool.cancel_all()
+        finally:
+            self._error_paused = False
 
     def _print_summary(self) -> None:
         """Print final summary."""
