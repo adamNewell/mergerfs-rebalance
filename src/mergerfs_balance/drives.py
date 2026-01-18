@@ -238,11 +238,18 @@ class DriveManager:
             self._drives[path].refresh_stats()
 
     def get_average_usage(self) -> float:
-        """Calculate average usage percentage across all drives."""
+        """Calculate target usage percentage based on total bytes across all drives.
+
+        This calculates (total used bytes / total capacity bytes) * 100, which gives
+        the correct target percentage when drives have different sizes.
+        """
         if not self._drives:
             return 0.0
-        total = sum(d.stats.usage_percent for d in self._drives.values())
-        return total / len(self._drives)
+        total_used = sum(d.stats.used_bytes for d in self._drives.values())
+        total_capacity = sum(d.stats.total_bytes for d in self._drives.values())
+        if total_capacity == 0:
+            return 0.0
+        return (total_used / total_capacity) * 100
 
     def get_usage_range(self) -> float:
         """Get the range between highest and lowest usage percentages."""
