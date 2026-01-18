@@ -1,13 +1,68 @@
 """Drive discovery and management for mergerfs filesystems."""
 
+import ctypes
+import errno
 import os
-import re
 import shutil
-import subprocess
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
+
+
+# ctypes interface to lgetxattr (same method as mergerfs.balance)
+_libc = ctypes.CDLL("libc.so.6", use_errno=True)
+_lgetxattr = _libc.lgetxattr
+_lgetxattr.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_void_p, ctypes.c_size_t]
+
+
+def lgetxattr(path: str, name: str) -> Optional[str]:
+    """Read an extended attribute from a file using lgetxattr syscall."""
+    path_bytes = path.encode(errors='backslashreplace')
+    name_bytes = name.encode(errors='backslashreplace')
+
+    length = 64
+    while True:
+        buf = ctypes.create_string_buffer(length)
+        res = _lgetxattr(path_bytes, name_bytes, buf, ctypes.c_size_t(length))
+        if res >= 0:
+            return buf.raw[0:res].decode(errors='backslashreplace')
+        else:
+            err = ctypes.get_errno()
+            if err == errno.ERANGE:
+                length *= 2
+            elif err == errno.ENODATA:
+                return None
+            else:
+                raise IOError(err, os.strerror(err), path)
+
+
+def ismergerfs(path: str) -> bool:
+    """Check if a path is on a mergerfs filesystem."""
+    try:
+        lgetxattr(path, 'user.mergerfs.version')
+        return True
+    except IOError:
+        return False
+
+
+def mergerfs_control_file(basedir: str) -> Optional[str]:
+    """Find the .mergerfs control file by walking up the directory tree."""
+    current = basedir
+    while current != '/':
+        ctrlfile = os.path.join(current, '.mergerfs')
+        if os.path.exists(ctrlfile):
+            return ctrlfile
+        current = os.path.dirname(current)
+    return None
+
+
+def mergerfs_srcmounts(ctrlfile: str) -> list[str]:
+    """Get the source mounts from a mergerfs control file."""
+    srcmounts = lgetxattr(ctrlfile, 'user.mergerfs.srcmounts')
+    if srcmounts:
+        return srcmounts.split(':')
+    return []
 
 
 @dataclass
@@ -60,80 +115,26 @@ def get_drive_stats(path: str) -> DriveStats:
 def discover_mergerfs_drives(mount_point: str) -> list[str]:
     """Discover underlying drives from a mergerfs mount point.
 
-    Reads the mergerfs configuration from /proc/mounts or xattr to find
-    the source drives that make up the pool.
+    Uses the same method as mergerfs.balance: reads user.mergerfs.srcmounts
+    xattr from the .mergerfs control file.
     """
-    drives = []
+    mount_point = os.path.realpath(mount_point)
 
-    # Method 1: Try reading from mergerfs xattr
-    try:
-        xattr_path = os.path.join(mount_point, '.mergerfs')
-        if os.path.exists(xattr_path):
-            # Read srcmounts from mergerfs control file
-            srcmounts_path = os.path.join(xattr_path, 'srcmounts')
-            if os.path.exists(srcmounts_path):
-                with open(srcmounts_path, 'r') as f:
-                    content = f.read().strip()
-                    if content:
-                        drives = [d.strip() for d in content.split(':') if d.strip()]
-                        if drives:
-                            return drives
-    except (OSError, PermissionError):
-        pass
+    # Find the control file
+    ctrlfile = mergerfs_control_file(mount_point)
+    if not ctrlfile:
+        raise ValueError(f"Could not find .mergerfs control file for: {mount_point}")
 
-    # Method 2: Try getfattr command
-    try:
-        result = subprocess.run(
-            ['getfattr', '-n', 'user.mergerfs.srcmounts', '--only-values', mount_point],
-            capture_output=True,
-            text=True,
-            timeout=5
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            drives = [d.strip() for d in result.stdout.strip().split(':') if d.strip()]
-            if drives:
-                return drives
-    except (subprocess.SubprocessError, FileNotFoundError, subprocess.TimeoutExpired):
-        pass
+    # Verify it's a mergerfs mount
+    if not ismergerfs(ctrlfile):
+        raise ValueError(f"{mount_point} is not a mergerfs mount")
 
-    # Method 3: Parse /proc/mounts
-    try:
-        with open('/proc/mounts', 'r') as f:
-            for line in f:
-                parts = line.split()
-                if len(parts) >= 3 and parts[1] == mount_point and parts[2] == 'fuse.mergerfs':
-                    # First field contains the source paths
-                    source = parts[0]
-                    # mergerfs sources are colon-separated or use glob patterns
-                    if ':' in source:
-                        drives = [d.strip() for d in source.split(':') if d.strip()]
-                    else:
-                        drives = [source]
-                    if drives:
-                        return drives
-    except (OSError, PermissionError):
-        pass
+    # Get source mounts
+    srcmounts = mergerfs_srcmounts(ctrlfile)
+    if not srcmounts:
+        raise ValueError(f"Could not read srcmounts from: {ctrlfile}")
 
-    # Method 4: Try /etc/fstab as fallback
-    try:
-        with open('/etc/fstab', 'r') as f:
-            for line in f:
-                line = line.strip()
-                if line.startswith('#') or not line:
-                    continue
-                parts = line.split()
-                if len(parts) >= 3 and parts[1] == mount_point and 'mergerfs' in parts[2]:
-                    source = parts[0]
-                    if ':' in source:
-                        drives = [d.strip() for d in source.split(':') if d.strip()]
-                    else:
-                        drives = [source]
-                    if drives:
-                        return drives
-    except (OSError, PermissionError):
-        pass
-
-    return drives
+    return srcmounts
 
 
 def expand_glob_paths(paths: list[str]) -> list[str]:

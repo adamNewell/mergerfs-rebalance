@@ -106,12 +106,14 @@ class TransferWorker:
         file_size: int = 0,
         dry_run: bool = False,
         progress_callback: Optional[Callable[[TransferProgress], None]] = None,
+        on_complete: Optional[Callable[["TransferResult"], None]] = None,
     ):
         self.source_path = source_path
         self.dest_path = dest_path
         self.file_size = file_size
         self.dry_run = dry_run
         self.progress_callback = progress_callback
+        self.on_complete = on_complete
 
         self.status = TransferStatus.PENDING
         self.progress = TransferProgress(total_bytes=file_size)
@@ -129,11 +131,14 @@ class TransferWorker:
         with self._lock:
             if self._cancelled.is_set():
                 self.status = TransferStatus.CANCELLED
-                return TransferResult(
+                result = TransferResult(
                     source_path=self.source_path,
                     dest_path=self.dest_path,
                     status=TransferStatus.CANCELLED,
                 )
+                if self.on_complete:
+                    self.on_complete(result)
+                return result
             self.status = TransferStatus.RUNNING
 
         try:
@@ -156,6 +161,8 @@ class TransferWorker:
                 self.status = result.status
                 self.result = result
 
+            if self.on_complete:
+                self.on_complete(result)
             return result
 
         except Exception as e:
@@ -169,6 +176,8 @@ class TransferWorker:
             with self._lock:
                 self.status = TransferStatus.FAILED
                 self.result = result
+            if self.on_complete:
+                self.on_complete(result)
             return result
 
     def _run_rsync(self) -> TransferResult:
@@ -273,14 +282,16 @@ class TransferWorker:
 
 
 class TransferPool:
-    """Manages a pool of concurrent transfers."""
+    """Manages a pool of concurrent transfers using ThreadPoolExecutor."""
 
     def __init__(self, max_workers: int = 1):
+        from concurrent.futures import ThreadPoolExecutor
+
         self.max_workers = max_workers
+        self._executor = ThreadPoolExecutor(max_workers=max_workers)
         self._workers: list[TransferWorker] = []
         self._completed: list[TransferResult] = []
         self._lock = threading.Lock()
-        self._threads: list[threading.Thread] = []
 
     @property
     def active_count(self) -> int:
@@ -307,20 +318,15 @@ class TransferPool:
         with self._lock:
             self._workers.append(worker)
 
-        thread = threading.Thread(target=self._run_worker, args=(worker,))
-        thread.daemon = True
-        thread.start()
+        def run_and_collect():
+            result = worker.run()
+            with self._lock:
+                self._completed.append(result)
+                # Clean up completed workers
+                self._workers[:] = [w for w in self._workers if w.status == TransferStatus.RUNNING]
 
-        with self._lock:
-            self._threads.append(thread)
-
+        self._executor.submit(run_and_collect)
         return True
-
-    def _run_worker(self, worker: TransferWorker) -> None:
-        """Run a worker and collect its result."""
-        result = worker.run()
-        with self._lock:
-            self._completed.append(result)
 
     def wait_for_any(self, timeout: Optional[float] = None) -> Optional[TransferResult]:
         """Wait for any transfer to complete and return its result."""
@@ -339,18 +345,15 @@ class TransferPool:
 
     def wait_for_all(self) -> list[TransferResult]:
         """Wait for all transfers to complete."""
-        results = []
-        with self._lock:
-            threads = self._threads[:]
-
-        for thread in threads:
-            thread.join()
+        self._executor.shutdown(wait=True)
+        # Re-create executor for potential future use
+        from concurrent.futures import ThreadPoolExecutor
+        self._executor = ThreadPoolExecutor(max_workers=self.max_workers)
 
         with self._lock:
             results = self._completed[:]
             self._completed.clear()
             self._workers.clear()
-            self._threads.clear()
 
         return results
 

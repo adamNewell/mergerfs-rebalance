@@ -6,6 +6,13 @@ from typing import Any, Optional
 from .cli import BalanceConfig, parse_size
 
 
+def _ensure_list(value: Any) -> list:
+    """Ensure value is a list (convert single string to list)."""
+    if isinstance(value, str):
+        return [value]
+    return list(value)
+
+
 def load_config(config_path: str) -> BalanceConfig:
     """Load configuration from a YAML file.
 
@@ -39,16 +46,10 @@ def _parse_config_dict(data: dict[str, Any], config_path: str) -> BalanceConfig:
         config.percentage = float(data['percentage'])
 
     if 'include' in data:
-        patterns = data['include']
-        if isinstance(patterns, str):
-            patterns = [patterns]
-        config.include_patterns = list(patterns)
+        config.include_patterns = _ensure_list(data['include'])
 
     if 'exclude' in data:
-        patterns = data['exclude']
-        if isinstance(patterns, str):
-            patterns = [patterns]
-        config.exclude_patterns = list(patterns)
+        config.exclude_patterns = _ensure_list(data['exclude'])
 
     if 'min_size' in data:
         value = data['min_size']
@@ -68,16 +69,10 @@ def _parse_config_dict(data: dict[str, Any], config_path: str) -> BalanceConfig:
         config.parallel = int(data['parallel'])
 
     if 'source_drives' in data:
-        drives = data['source_drives']
-        if isinstance(drives, str):
-            drives = [drives]
-        config.source_drives = list(drives)
+        config.source_drives = _ensure_list(data['source_drives'])
 
     if 'dest_drives' in data:
-        drives = data['dest_drives']
-        if isinstance(drives, str):
-            drives = [drives]
-        config.dest_drives = list(drives)
+        config.dest_drives = _ensure_list(data['dest_drives'])
 
     if 'dry_run' in data:
         config.dry_run = bool(data['dry_run'])
@@ -153,26 +148,23 @@ def merge_configs(file_config: BalanceConfig, cli_config: BalanceConfig) -> Bala
 
 def get_default_config_paths() -> list[str]:
     """Return list of default config file locations to check."""
-    paths = []
-
-    # Current directory
-    paths.append('mergerfs-balance.yaml')
-    paths.append('mergerfs-balance.yml')
-    paths.append('.mergerfs-balance.yaml')
-    paths.append('.mergerfs-balance.yml')
-
-    # User config directory
     config_home = os.environ.get('XDG_CONFIG_HOME', os.path.expanduser('~/.config'))
-    paths.append(os.path.join(config_home, 'mergerfs-balance', 'config.yaml'))
-    paths.append(os.path.join(config_home, 'mergerfs-balance', 'config.yml'))
 
-    # /etc
-    paths.append('/etc/mergerfs-balance.yaml')
-    paths.append('/etc/mergerfs-balance.yml')
-    paths.append('/etc/mergerfs-balance/config.yaml')
-    paths.append('/etc/mergerfs-balance/config.yml')
-
-    return paths
+    return [
+        # Current directory
+        'mergerfs-balance.yaml',
+        'mergerfs-balance.yml',
+        '.mergerfs-balance.yaml',
+        '.mergerfs-balance.yml',
+        # User config directory
+        os.path.join(config_home, 'mergerfs-balance', 'config.yaml'),
+        os.path.join(config_home, 'mergerfs-balance', 'config.yml'),
+        # /etc
+        '/etc/mergerfs-balance.yaml',
+        '/etc/mergerfs-balance.yml',
+        '/etc/mergerfs-balance/config.yaml',
+        '/etc/mergerfs-balance/config.yml',
+    ]
 
 
 def find_config_file() -> Optional[str]:

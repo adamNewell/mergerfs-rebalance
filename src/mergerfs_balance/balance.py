@@ -68,23 +68,25 @@ class FileSelector:
             return False
         return True
 
-    def is_valid_file(self, path: str) -> bool:
-        """Check if a file should be considered for transfer."""
+    def get_valid_file_size(self, path: str) -> Optional[int]:
+        """Check if a file should be considered for transfer and return its size.
+
+        Returns file size if valid, None otherwise.
+        """
         if not os.path.isfile(path):
-            return False
+            return None
 
         filename = os.path.basename(path)
         if not self.matches_patterns(filename):
-            return False
+            return None
 
         try:
             size = os.path.getsize(path)
             if not self.matches_size(size):
-                return False
+                return None
+            return size
         except OSError:
-            return False
-
-        return True
+            return None
 
     def walk_drive(self, drive_path: str) -> Iterator[tuple[str, int]]:
         """Walk a drive and yield (file_path, file_size) for valid files.
@@ -101,15 +103,9 @@ class FileSelector:
                     continue
 
                 file_path = os.path.join(root, filename)
-
-                if not self.is_valid_file(file_path):
-                    continue
-
-                try:
-                    size = os.path.getsize(file_path)
+                size = self.get_valid_file_size(file_path)
+                if size is not None:
                     yield file_path, size
-                except OSError:
-                    continue
 
 
 class BalanceCoordinator:
@@ -152,7 +148,9 @@ class BalanceCoordinator:
         """Run the balance operation. Returns exit code."""
         if self.config.verbose >= 2:
             from .display import ProgressDisplay
-            self._display = ProgressDisplay(self.drive_manager, self.transfer_pool, self.stats)
+            self._display = ProgressDisplay(
+                self.drive_manager, self.transfer_pool, self.stats, self.config.percentage
+            )
             self._display.start()
 
         try:
@@ -215,14 +213,6 @@ class BalanceCoordinator:
                 if not self.drive_manager.acquire_write_lock(dest_drive.path):
                     continue
 
-                # Create and submit transfer
-                worker = TransferWorker(
-                    source_path=source_path,
-                    dest_path=dest_path,
-                    file_size=file_size,
-                    dry_run=self.config.dry_run,
-                )
-
                 if self.config.dry_run:
                     self._log_info(f"[DRY RUN] Would move: {source_path} -> {dest_path}")
                     self.drive_manager.release_write_lock(dest_drive.path)
@@ -232,7 +222,7 @@ class BalanceCoordinator:
                 else:
                     self._log_verbose(f"Starting transfer: {source_path} -> {dest_path}")
 
-                    # Wrap worker to release lock on completion
+                    # Create completion callback
                     def on_complete(result: TransferResult, dest_path: str = dest_drive.path):
                         self.drive_manager.release_write_lock(dest_path)
                         self.stats.add_result(result)
@@ -241,15 +231,14 @@ class BalanceCoordinator:
                         elif result.status == TransferStatus.FAILED:
                             self._log_error(f"Failed: {result.source_path} - {result.error_message}")
 
-                    # Store original run method
-                    original_run = worker.run
-
-                    def wrapped_run(cb=on_complete, orig=original_run):
-                        result = orig()
-                        cb(result)
-                        return result
-
-                    worker.run = wrapped_run
+                    # Create and submit transfer with completion callback
+                    worker = TransferWorker(
+                        source_path=source_path,
+                        dest_path=dest_path,
+                        file_size=file_size,
+                        dry_run=self.config.dry_run,
+                        on_complete=on_complete,
+                    )
 
                     if not self.transfer_pool.submit(worker):
                         self.drive_manager.release_write_lock(dest_drive.path)

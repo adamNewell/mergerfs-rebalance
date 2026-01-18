@@ -27,10 +27,12 @@ class ProgressDisplay:
         drive_manager: "DriveManager",
         transfer_pool: "TransferPool",
         stats: "BalanceStats",
+        target_percentage: float = 2.0,
     ):
         self.drive_manager = drive_manager
         self.transfer_pool = transfer_pool
         self.stats = stats
+        self.target_percentage = target_percentage
 
         self.console = Console()
         self._live: Live | None = None
@@ -79,8 +81,7 @@ class ProgressDisplay:
         table.add_column()
 
         # Target info
-        target_pct = 2.0  # Default, should get from config
-        table.add_row(f"[bold]Target:[/bold] all drives within {target_pct}% of each other")
+        table.add_row(f"[bold]Target:[/bold] all drives within {self.target_percentage}% of each other")
         table.add_row("")
 
         # Drive usage section
@@ -201,34 +202,3 @@ class ProgressDisplay:
             )
 
         return table
-
-
-class SimpleDisplay:
-    """Simple text-based display for non-rich mode."""
-
-    def __init__(
-        self,
-        drive_manager: "DriveManager",
-        stats: "BalanceStats",
-    ):
-        self.drive_manager = drive_manager
-        self.stats = stats
-        self._last_update = 0
-
-    def update(self, force: bool = False) -> None:
-        """Print a status update."""
-        now = time.time()
-        if not force and now - self._last_update < 5:
-            return
-
-        self._last_update = now
-
-        # Print drive status
-        print("\n--- Drive Status ---")
-        for drive in sorted(self.drive_manager.all_drives, key=lambda d: d.path):
-            locked = " (busy)" if drive.write_locked else ""
-            print(f"  {drive.path}: {drive.stats.usage_percent:.1f}%{locked}")
-
-        # Print stats
-        print(f"\nProgress: {self.stats.files_moved} files, "
-              f"{format_bytes(self.stats.bytes_transferred)} transferred")

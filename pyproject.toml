@@ -6,7 +6,6 @@ build-backend = "hatchling.build"
 name = "mergerfs-balance"
 version = "0.1.0"
 description = "Parallel drive balancer for mergerfs filesystems"
-readme = "README.md"
 requires-python = ">=3.9"
 license = "MIT"
 authors = [
