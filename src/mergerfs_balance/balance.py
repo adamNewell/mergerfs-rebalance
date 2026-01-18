@@ -222,6 +222,10 @@ class BalanceCoordinator:
 
                 source_path, file_size = file_info
 
+                # Verify file still exists (may have been moved by another worker)
+                if not os.path.exists(source_path):
+                    continue
+
                 # Calculate destination path
                 rel_path = os.path.relpath(source_path, source_drive.path)
                 dest_path = os.path.join(dest_drive.path, rel_path)
