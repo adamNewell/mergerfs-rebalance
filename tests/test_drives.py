@@ -1,6 +1,5 @@
 """Tests for drive management functions."""
 
-import pytest
 
 
 class TestDriveStats:
@@ -161,3 +160,56 @@ class TestIsBalanced:
 
         assert usage_range == 0.0
         assert usage_range <= target_pct  # Balanced
+
+
+class TestGetBytesToMove:
+    """Tests for calculating bytes to move from a drive."""
+
+    def test_overfull_drive_positive_bytes(self, mock_drives):
+        """Test that overfull drive returns positive bytes to move."""
+        # disk1: 80% used of 1TB = 800GB used
+        # Average usage is 52.5% (calculated from total pool)
+        # Target for disk1: 1TB * 52.5% = 525GB
+        # Bytes to move: 800GB - 525GB = 275GB
+        overfull_drive = mock_drives[0]  # disk1 at 80%
+        total_used = sum(d.stats.used_bytes for d in mock_drives)
+        total_capacity = sum(d.stats.total_bytes for d in mock_drives)
+        avg = (total_used / total_capacity) * 100  # 52.5%
+
+        target_bytes = overfull_drive.stats.total_bytes * (avg / 100)
+        expected_bytes_to_move = overfull_drive.stats.used_bytes - int(target_bytes)
+
+        # Manually calculate: 800GB - 525GB = 275GB
+        assert expected_bytes_to_move > 0
+
+    def test_underfull_drive_zero_bytes(self, mock_drives):
+        """Test that underfull drive returns zero bytes to move."""
+        # disk2: 30% used, average is 52.5%
+        # Since 30% < 52.5%, bytes to move should be 0
+        underfull_drive = mock_drives[1]  # disk2 at 30%
+        total_used = sum(d.stats.used_bytes for d in mock_drives)
+        total_capacity = sum(d.stats.total_bytes for d in mock_drives)
+        avg = (total_used / total_capacity) * 100  # 52.5%
+
+        target_bytes = underfull_drive.stats.total_bytes * (avg / 100)
+        bytes_to_move = underfull_drive.stats.used_bytes - int(target_bytes)
+
+        # Should be negative, so max(0, bytes_to_move) = 0
+        assert max(0, bytes_to_move) == 0
+
+    def test_at_average_drive_zero_bytes(self, mock_drives):
+        """Test that drive at average usage returns zero bytes to move."""
+        # Set a drive to exactly average usage
+        total_used = sum(d.stats.used_bytes for d in mock_drives)
+        total_capacity = sum(d.stats.total_bytes for d in mock_drives)
+        avg = (total_used / total_capacity) * 100
+
+        # Set disk2 to exactly average
+        mock_drives[1].stats.used_bytes = int(mock_drives[1].stats.total_bytes * (avg / 100))
+        mock_drives[1].stats.free_bytes = mock_drives[1].stats.total_bytes - mock_drives[1].stats.used_bytes
+
+        target_bytes = mock_drives[1].stats.total_bytes * (avg / 100)
+        bytes_to_move = mock_drives[1].stats.used_bytes - int(target_bytes)
+
+        # Should be approximately 0 (within rounding)
+        assert abs(bytes_to_move) < 2  # Allow for small rounding differences

@@ -91,6 +91,7 @@ class BalanceConfig:
     abort_on_error: bool = False  # Abort immediately after error_threshold consecutive errors
     error_threshold: int = 5  # Consecutive errors before pausing/aborting
     error_log: Optional[str] = None  # File to log errors to
+    file_selection_lookahead: int = 100  # Files to examine when selecting best transfer candidate
 
     def validate(self) -> list[str]:
         """Validate configuration, return list of errors."""
@@ -262,6 +263,14 @@ Examples:
     )
 
     parser.add_argument(
+        '--file-selection-lookahead',
+        type=int,
+        default=100,
+        metavar='N',
+        help='files to examine when selecting best transfer candidate (default: 100)'
+    )
+
+    parser.add_argument(
         '--version',
         action='version',
         version='%(prog)s 0.1.0'
@@ -292,6 +301,7 @@ def parse_args(args: Optional[list[str]] = None) -> BalanceConfig:
         abort_on_error=parsed.abort_on_error,
         error_threshold=parsed.error_threshold,
         error_log=parsed.error_log,
+        file_selection_lookahead=parsed.file_selection_lookahead,
     )
 
     return config

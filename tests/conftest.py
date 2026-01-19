@@ -3,8 +3,6 @@
 import os
 import tempfile
 from dataclasses import dataclass
-from typing import Optional
-from unittest.mock import MagicMock, patch
 
 import pytest
 

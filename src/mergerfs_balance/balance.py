@@ -5,6 +5,7 @@ import os
 import signal
 import sys
 import threading
+from collections import deque
 from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Optional
@@ -108,6 +109,68 @@ class FileSelector:
                     yield file_path, size
 
 
+class BufferedFileGenerator:
+    """A wrapper around a file generator that supports prepending items back.
+
+    This allows the file selection algorithm to examine multiple candidates,
+    select the best one, and return the unused candidates to the front of
+    the buffer for future selection calls.
+    """
+
+    def __init__(self, generator: Iterator[tuple[str, int]]):
+        self._generator = generator
+        self._buffer: deque[tuple[str, int]] = deque()
+        self._exhausted = False
+
+    def __iter__(self) -> "BufferedFileGenerator":
+        return self
+
+    def __next__(self) -> tuple[str, int]:
+        """Get the next file, from buffer first, then from generator."""
+        if self._buffer:
+            return self._buffer.popleft()
+        if self._exhausted:
+            raise StopIteration
+        try:
+            return next(self._generator)
+        except StopIteration:
+            self._exhausted = True
+            raise
+
+    def prepend(self, items: list[tuple[str, int]]) -> None:
+        """Prepend items back to the front of the buffer."""
+        for item in reversed(items):
+            self._buffer.appendleft(item)
+
+    @property
+    def exhausted(self) -> bool:
+        """Check if the underlying generator is exhausted and buffer is empty."""
+        return self._exhausted and not self._buffer
+
+
+def _calculate_file_score(file_size: int, bytes_to_move: int) -> float:
+    """Score how well file_size matches bytes_to_move. Higher is better.
+
+    Returns a score between 0.0 and 1.0:
+    - 1.0 = perfect match (file_size == bytes_to_move)
+    - 0.5 = file is half the size needed, or double the size needed
+    - Approaching 0 = very poor match
+    """
+    if file_size <= 0:
+        return 0.0
+    if bytes_to_move <= 0:
+        return 1.0  # Any file is fine if drive is already at target
+    ratio = file_size / bytes_to_move
+    if ratio <= 1.0:
+        return ratio  # 100% match = 1.0, 50% match = 0.5
+    else:
+        return 1.0 / ratio  # 200% overshoot = 0.5
+
+
+# Default lookahead window size for file selection
+DEFAULT_LOOKAHEAD_SIZE = 100
+
+
 class BalanceCoordinator:
     """Orchestrates the balance operation across drives."""
 
@@ -139,10 +202,13 @@ class BalanceCoordinator:
             max_size=config.max_size,
         )
 
-        # Cache of persistent generators per drive path for efficient directory traversal
+        # Cache of buffered generators per drive path for efficient directory traversal
         # Instead of restarting os.walk from the beginning on each call, we resume
         # from where we left off, reducing O(N²) traversal to O(N)
-        self._drive_generators: dict[str, Iterator[tuple[str, int]]] = {}
+        self._drive_generators: dict[str, BufferedFileGenerator] = {}
+
+        # Lookahead size for intelligent file selection
+        self._lookahead_size = getattr(config, 'file_selection_lookahead', DEFAULT_LOOKAHEAD_SIZE)
 
         # Calculate worker count: auto (0) means min(overfull, underfull) drives
         if config.parallel == 0:
@@ -304,36 +370,71 @@ class BalanceCoordinator:
         return 0 if self.stats.errors == 0 else 1
 
     def _find_file_to_transfer(self, source_drive: Drive) -> Optional[tuple[str, int]]:
-        """Find the next file on source drive that can be transferred.
+        """Find the best file on source drive to transfer using intelligent selection.
 
-        Uses persistent generators per drive to avoid restarting directory
-        traversal from the beginning on each call. This reduces O(N²) cost
-        to O(N) for the overall balance operation.
+        Uses a bounded lookahead algorithm to select files whose sizes best match
+        the bytes needed to achieve balance, rather than just taking the first file.
+        This reduces the number of file transfers needed for the same balance result.
+
+        Uses persistent buffered generators per drive to avoid restarting directory
+        traversal from the beginning on each call, reducing O(N²) cost to O(N).
         """
         walk_path = self.drive_manager.get_walk_path(source_drive)
 
-        # Get or create a persistent generator for this drive
+        # Get or create a persistent buffered generator for this drive
         if walk_path not in self._drive_generators:
-            self._drive_generators[walk_path] = self.file_selector.walk_drive(walk_path)
+            raw_generator = self.file_selector.walk_drive(walk_path)
+            self._drive_generators[walk_path] = BufferedFileGenerator(raw_generator)
 
         generator = self._drive_generators[walk_path]
 
-        while True:
+        # Calculate how many bytes we need to move from this drive
+        bytes_to_move = self.drive_manager.get_bytes_to_move(source_drive)
+
+        # Collect candidates up to lookahead size
+        candidates: list[tuple[str, int, float]] = []  # (path, size, score)
+
+        for _ in range(self._lookahead_size):
             try:
                 file_path, file_size = next(generator)
 
-                # Check if destination has enough space
+                # Check if destination has enough space for this file
                 dest = self.drive_manager.get_best_destination(
                     self.config.percentage, exclude_busy=True
                 )
-                if dest and dest.stats.free_bytes > file_size:
-                    return file_path, file_size
-                # Otherwise continue to next file
+                if not dest or dest.stats.free_bytes <= file_size:
+                    # File too large for any destination, skip it
+                    continue
+
+                # Calculate score for this file
+                score = _calculate_file_score(file_size, bytes_to_move)
+                candidates.append((file_path, file_size, score))
 
             except StopIteration:
-                # Generator exhausted - remove it so we can create a fresh one if needed
+                # Generator exhausted
+                break
+
+        if not candidates:
+            # No valid candidates found
+            if generator.exhausted:
                 del self._drive_generators[walk_path]
-                return None
+            return None
+
+        # Find the best candidate (highest score)
+        best_idx = max(range(len(candidates)), key=lambda i: candidates[i][2])
+        best_path, best_size, _ = candidates[best_idx]
+
+        # Return unused candidates to the buffer for future calls
+        unused = [(c[0], c[1]) for i, c in enumerate(candidates) if i != best_idx]
+        if unused:
+            generator.prepend(unused)
+
+        self._log_verbose(
+            f"Selected file {best_path} ({best_size} bytes) from {len(candidates)} candidates "
+            f"(need {bytes_to_move} bytes to balance)"
+        )
+
+        return best_path, best_size
 
     def _log_info(self, message: str) -> None:
         """Log an info message."""

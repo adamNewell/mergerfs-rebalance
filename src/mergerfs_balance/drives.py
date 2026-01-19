@@ -275,6 +275,18 @@ class DriveManager:
         underfull = [d for d in self.dest_drives if d.stats.usage_percent < threshold]
         return sorted(underfull, key=lambda d: d.stats.free_bytes, reverse=True)
 
+    def get_bytes_to_move(self, drive: Drive) -> int:
+        """Calculate bytes to move from drive to reach average usage.
+
+        Returns the number of bytes that should be moved off this drive
+        to bring it to the pool's average usage percentage. Returns 0
+        if the drive is at or below average.
+        """
+        avg = self.get_average_usage()
+        target_bytes_used = drive.stats.total_bytes * (avg / 100)
+        bytes_to_move = drive.stats.used_bytes - int(target_bytes_used)
+        return max(0, bytes_to_move)
+
     def get_best_destination(
         self, target_percentage: float, exclude_busy: bool = True
     ) -> Optional[Drive]:
