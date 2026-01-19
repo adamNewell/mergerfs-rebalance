@@ -291,6 +291,7 @@ class TransferPool:
         self._executor = ThreadPoolExecutor(max_workers=max_workers)
         self._workers: list[TransferWorker] = []
         self._completed: list[TransferResult] = []
+        self._in_flight_paths: set[str] = set()
         self._lock = threading.Lock()
 
     @property
@@ -310,18 +311,29 @@ class TransferPool:
         with self._lock:
             return [w for w in self._workers if w.status == TransferStatus.RUNNING]
 
+    def is_path_in_flight(self, path: str) -> bool:
+        """Check if a source path is already being transferred."""
+        with self._lock:
+            return path in self._in_flight_paths
+
     def submit(self, worker: TransferWorker) -> bool:
-        """Submit a worker for execution. Returns False if pool is full."""
+        """Submit a worker for execution. Returns False if pool is full or path already in flight."""
         if not self.has_capacity:
             return False
 
         with self._lock:
+            # Check if this file is already being transferred
+            if worker.source_path in self._in_flight_paths:
+                return False
+            self._in_flight_paths.add(worker.source_path)
             self._workers.append(worker)
 
         def run_and_collect():
             result = worker.run()
             with self._lock:
                 self._completed.append(result)
+                # Remove from in-flight tracking
+                self._in_flight_paths.discard(worker.source_path)
                 # Clean up completed workers
                 self._workers[:] = [w for w in self._workers if w.status == TransferStatus.RUNNING]
 
@@ -354,6 +366,7 @@ class TransferPool:
             results = self._completed[:]
             self._completed.clear()
             self._workers.clear()
+            self._in_flight_paths.clear()
 
         return results
 

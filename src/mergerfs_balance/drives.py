@@ -276,9 +276,19 @@ class DriveManager:
         underfull = [d for d in self.dest_drives if d.stats.usage_percent < threshold]
         return sorted(underfull, key=lambda d: d.stats.free_bytes, reverse=True)
 
-    def get_best_destination(self, exclude_busy: bool = True) -> Optional[Drive]:
-        """Get the destination drive with most free space that isn't write-locked."""
-        candidates = self.dest_drives
+    def get_best_destination(
+        self, target_percentage: float, exclude_busy: bool = True
+    ) -> Optional[Drive]:
+        """Get the best underfull destination drive that isn't write-locked.
+
+        Only considers drives that are below the target threshold (underfull).
+        Among underfull drives, returns the one with most free space.
+        """
+        avg = self.get_average_usage()
+        threshold = avg - (target_percentage / 2)
+
+        # Only consider underfull drives as destinations
+        candidates = [d for d in self.dest_drives if d.stats.usage_percent < threshold]
         if exclude_busy:
             candidates = [d for d in candidates if not d.write_locked]
         if not candidates:

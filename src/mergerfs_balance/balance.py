@@ -206,7 +206,9 @@ class BalanceCoordinator:
                     break
 
                 # Find best destination
-                dest_drive = self.drive_manager.get_best_destination(exclude_busy=True)
+                dest_drive = self.drive_manager.get_best_destination(
+                    self.config.percentage, exclude_busy=True
+                )
                 if not dest_drive:
                     # All destinations are busy, wait for a transfer
                     break
@@ -301,7 +303,9 @@ class BalanceCoordinator:
         walk_path = self.drive_manager.get_walk_path(source_drive)
         for file_path, file_size in self.file_selector.walk_drive(walk_path):
             # Check if destination has enough space
-            dest = self.drive_manager.get_best_destination(exclude_busy=True)
+            dest = self.drive_manager.get_best_destination(
+                self.config.percentage, exclude_busy=True
+            )
             if dest and dest.stats.free_bytes > file_size:
                 return file_path, file_size
         return None
