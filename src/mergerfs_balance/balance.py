@@ -359,10 +359,11 @@ class BalanceCoordinator:
             if self._display:
                 self._display.update()
 
-        # Wait for remaining transfers
+        # Wait for remaining transfers - always wait to avoid race conditions
+        # where active_count might report 0 while transfers are still completing
         if self.transfer_pool.active_count > 0:
             self._log_info("Waiting for remaining transfers to complete...")
-            self.transfer_pool.wait_for_all()
+        self.transfer_pool.wait_for_all()
 
         # Final summary
         self._print_summary()
@@ -392,18 +393,25 @@ class BalanceCoordinator:
         bytes_to_move = self.drive_manager.get_bytes_to_move(source_drive)
 
         # Collect candidates up to lookahead size
+        # Note: We don't check destination availability here - that's done in the
+        # balance loop. Checking here would cause us to skip all files when
+        # destinations are temporarily busy (write-locked), even though we just
+        # need to wait for transfers to complete.
         candidates: list[tuple[str, int, float]] = []  # (path, size, score)
+        skipped_large: list[tuple[str, int]] = []  # Files too large for any destination
+
+        # Get max available space across all destinations (including busy ones)
+        # to filter out files that can never be transferred
+        all_dests = self.drive_manager.get_underfull_drives(self.config.percentage)
+        max_dest_space = max((d.stats.free_bytes for d in all_dests), default=0)
 
         for _ in range(self._lookahead_size):
             try:
                 file_path, file_size = next(generator)
 
-                # Check if destination has enough space for this file
-                dest = self.drive_manager.get_best_destination(
-                    self.config.percentage, exclude_busy=True
-                )
-                if not dest or dest.stats.free_bytes <= file_size:
-                    # File too large for any destination, skip it
+                # Skip files too large for ANY destination (even when not busy)
+                if max_dest_space > 0 and file_size > max_dest_space:
+                    skipped_large.append((file_path, file_size))
                     continue
 
                 # Calculate score for this file
@@ -415,8 +423,11 @@ class BalanceCoordinator:
                 break
 
         if not candidates:
-            # No valid candidates found
-            if generator.exhausted:
+            # No valid candidates found - put back any skipped files for retry later
+            # (destination space might increase after transfers complete)
+            if skipped_large:
+                generator.prepend(skipped_large)
+            if generator.exhausted and not skipped_large:
                 del self._drive_generators[walk_path]
             return None
 
@@ -424,8 +435,9 @@ class BalanceCoordinator:
         best_idx = max(range(len(candidates)), key=lambda i: candidates[i][2])
         best_path, best_size, _ = candidates[best_idx]
 
-        # Return unused candidates to the buffer for future calls
+        # Return unused candidates and skipped files to the buffer for future calls
         unused = [(c[0], c[1]) for i, c in enumerate(candidates) if i != best_idx]
+        unused.extend(skipped_large)
         if unused:
             generator.prepend(unused)
 
