@@ -9,7 +9,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-
 # ctypes interface to lgetxattr (same method as mergerfs.balance)
 _libc = ctypes.CDLL("libc.so.6", use_errno=True)
 _lgetxattr = _libc.lgetxattr
@@ -34,7 +33,7 @@ def lgetxattr(path: str, name: str) -> Optional[str]:
             elif err == errno.ENODATA:
                 return None
             else:
-                raise IOError(err, os.strerror(err), path)
+                raise OSError(err, os.strerror(err), path)
 
 
 def ismergerfs(path: str) -> bool:
@@ -42,7 +41,7 @@ def ismergerfs(path: str) -> bool:
     try:
         lgetxattr(path, 'user.mergerfs.version')
         return True
-    except IOError:
+    except OSError:
         return False
 
 

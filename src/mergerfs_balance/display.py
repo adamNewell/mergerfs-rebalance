@@ -3,17 +3,14 @@
 import os
 import threading
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 from rich.console import Console
 from rich.live import Live
 from rich.panel import Panel
-from rich.progress import BarColumn, Progress, SpinnerColumn, TaskID, TextColumn
 from rich.table import Table
 
-from .transfer import TransferStatus, format_bytes
-
-from typing import Optional
+from .transfer import format_bytes
 
 
 def format_duration(seconds: int) -> str:

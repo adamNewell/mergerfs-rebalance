@@ -2,39 +2,68 @@
 
 import argparse
 import os
+import re
 import sys
 from dataclasses import dataclass, field
 from typing import Optional
 
 
 def parse_size(size_str: str) -> int:
-    """Parse a size string like '100M' or '50G' into bytes."""
+    """Parse a size string like '100M', '50GB', or '1TiB' into bytes.
+
+    Supports:
+        - Raw bytes: '1024'
+        - Single-char units: '100K', '50M', '1G', '2T', '1P'
+        - Two-char units: '100KB', '50MB', '1GB', '2TB', '1PB'
+        - IEC units: '100KiB', '50MiB', '1GiB', '2TiB', '1PiB'
+        - Decimal values: '1.5G', '2.5TB'
+        - Whitespace: ' 100 MB '
+    """
     size_str = size_str.strip().upper()
-    multipliers = {
-        'B': 1,
-        'K': 1024,
-        'M': 1024 ** 2,
-        'G': 1024 ** 3,
-        'T': 1024 ** 4,
-    }
 
     if not size_str:
         raise ValueError("Empty size string")
 
-    # Check if last character is a unit
-    if size_str[-1] in multipliers:
-        unit = size_str[-1]
-        number = size_str[:-1]
-    else:
-        unit = 'B'
-        number = size_str
+    # Pattern: optional number (int or float), optional whitespace, optional unit
+    pattern = r'^(\d+(?:\.\d+)?)\s*([A-Z]*)$'
+    match = re.match(pattern, size_str)
 
-    try:
-        value = float(number)
-    except ValueError:
+    if not match:
         raise ValueError(f"Invalid size format: {size_str}")
 
-    return int(value * multipliers[unit])
+    number_str = match.group(1)
+    unit_str = match.group(2)
+
+    try:
+        value = float(number_str)
+    except ValueError as e:
+        raise ValueError(f"Invalid size format: {size_str}") from e
+
+    # Map unit strings to multipliers (binary, 1024-based)
+    unit_multipliers = {
+        '': 1,          # No unit = bytes
+        'B': 1,         # Bytes
+        'K': 1024,      # Kilobytes
+        'KB': 1024,
+        'KIB': 1024,
+        'M': 1024 ** 2,  # Megabytes
+        'MB': 1024 ** 2,
+        'MIB': 1024 ** 2,
+        'G': 1024 ** 3,  # Gigabytes
+        'GB': 1024 ** 3,
+        'GIB': 1024 ** 3,
+        'T': 1024 ** 4,  # Terabytes
+        'TB': 1024 ** 4,
+        'TIB': 1024 ** 4,
+        'P': 1024 ** 5,  # Petabytes
+        'PB': 1024 ** 5,
+        'PIB': 1024 ** 5,
+    }
+
+    if unit_str not in unit_multipliers:
+        raise ValueError(f"Unknown size unit: {unit_str}")
+
+    return int(value * unit_multipliers[unit_str])
 
 
 @dataclass

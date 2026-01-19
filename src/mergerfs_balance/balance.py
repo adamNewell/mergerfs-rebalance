@@ -5,9 +5,9 @@ import os
 import signal
 import sys
 import threading
+from collections.abc import Iterator
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Iterator, Optional
+from typing import Optional
 
 from .cli import BalanceConfig
 from .drives import Drive, DriveManager
@@ -138,6 +138,11 @@ class BalanceCoordinator:
             min_size=config.min_size,
             max_size=config.max_size,
         )
+
+        # Cache of persistent generators per drive path for efficient directory traversal
+        # Instead of restarting os.walk from the beginning on each call, we resume
+        # from where we left off, reducing O(N²) traversal to O(N)
+        self._drive_generators: dict[str, Iterator[tuple[str, int]]] = {}
 
         # Calculate worker count: auto (0) means min(overfull, underfull) drives
         if config.parallel == 0:
@@ -280,7 +285,7 @@ class BalanceCoordinator:
 
             # Wait for at least one transfer to complete before next iteration
             if self.transfer_pool.active_count > 0:
-                result = self.transfer_pool.wait_for_any(timeout=1.0)
+                self.transfer_pool.wait_for_any(timeout=1.0)
 
             iteration += 1
 
@@ -299,16 +304,36 @@ class BalanceCoordinator:
         return 0 if self.stats.errors == 0 else 1
 
     def _find_file_to_transfer(self, source_drive: Drive) -> Optional[tuple[str, int]]:
-        """Find the first file on source drive that can be transferred."""
+        """Find the next file on source drive that can be transferred.
+
+        Uses persistent generators per drive to avoid restarting directory
+        traversal from the beginning on each call. This reduces O(N²) cost
+        to O(N) for the overall balance operation.
+        """
         walk_path = self.drive_manager.get_walk_path(source_drive)
-        for file_path, file_size in self.file_selector.walk_drive(walk_path):
-            # Check if destination has enough space
-            dest = self.drive_manager.get_best_destination(
-                self.config.percentage, exclude_busy=True
-            )
-            if dest and dest.stats.free_bytes > file_size:
-                return file_path, file_size
-        return None
+
+        # Get or create a persistent generator for this drive
+        if walk_path not in self._drive_generators:
+            self._drive_generators[walk_path] = self.file_selector.walk_drive(walk_path)
+
+        generator = self._drive_generators[walk_path]
+
+        while True:
+            try:
+                file_path, file_size = next(generator)
+
+                # Check if destination has enough space
+                dest = self.drive_manager.get_best_destination(
+                    self.config.percentage, exclude_busy=True
+                )
+                if dest and dest.stats.free_bytes > file_size:
+                    return file_path, file_size
+                # Otherwise continue to next file
+
+            except StopIteration:
+                # Generator exhausted - remove it so we can create a fresh one if needed
+                del self._drive_generators[walk_path]
+                return None
 
     def _log_info(self, message: str) -> None:
         """Log an info message."""

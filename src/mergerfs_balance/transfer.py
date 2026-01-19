@@ -2,7 +2,6 @@
 
 import os
 import re
-import shutil
 import subprocess
 import threading
 from dataclasses import dataclass
@@ -206,6 +205,22 @@ class TransferWorker:
                 bufsize=1,
             )
 
+            # Collect stderr in a background thread to prevent deadlock
+            # if stderr output exceeds the 64KB pipe buffer
+            stderr_lines: list[str] = []
+
+            def drain_stderr():
+                """Read stderr in background to prevent pipe buffer deadlock."""
+                try:
+                    for line in self._process.stderr:
+                        stderr_lines.append(line)
+                except (ValueError, OSError):
+                    # Pipe closed, ignore
+                    pass
+
+            stderr_thread = threading.Thread(target=drain_stderr, daemon=True)
+            stderr_thread.start()
+
             # Read progress from stdout
             while True:
                 if self._cancelled.is_set():
@@ -214,6 +229,7 @@ class TransferWorker:
                         self._process.wait(timeout=5)
                     except subprocess.TimeoutExpired:
                         self._process.kill()
+                    stderr_thread.join(timeout=1)
                     return TransferResult(
                         source_path=self.source_path,
                         dest_path=self.dest_path,
@@ -233,7 +249,8 @@ class TransferWorker:
 
             # Wait for process to complete
             returncode = self._process.wait()
-            stderr = self._process.stderr.read()
+            stderr_thread.join(timeout=5)
+            stderr = ''.join(stderr_lines)
 
             if returncode == 0:
                 # Clean up empty parent directories on source

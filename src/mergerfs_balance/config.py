@@ -20,13 +20,13 @@ def load_config(config_path: str) -> BalanceConfig:
     """
     try:
         import yaml
-    except ImportError:
+    except ImportError as e:
         raise ImportError(
             "PyYAML is required to use config files. "
             "Install it with: pip install mergerfs-balance[yaml]"
-        )
+        ) from e
 
-    with open(config_path, 'r') as f:
+    with open(config_path) as f:
         data = yaml.safe_load(f) or {}
 
     return _parse_config_dict(data, config_path)
